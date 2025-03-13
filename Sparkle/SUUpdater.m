@@ -77,7 +77,7 @@ static NSString *const SUUpdaterDefaultsObservationContext = @"SUUpdaterDefaults
 
 // Debug is not defined in released builds and pedantic mode can enable -Wundef
 #if defined(DEBUG) && DEBUG
-+ (void)load
++ (void)initialize
 {
     // Debug builds have different configurations for update check intervals
     // We're using NSLog instead of SULog here because we don't want to start Sparkle's logger here
