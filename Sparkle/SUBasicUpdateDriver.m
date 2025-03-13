@@ -25,10 +25,12 @@
 #import "SUUpdater.h"
 #import "SUAppcast.h"
 #import "SUAppcastItem.h"
+#import "SUGlobalUpdateLock.h"
+#import "SUSystemUpdateInfo.h"
 
 #import "SPUURLRequest.h"
-#import "SPUDownloaderDeprecated.h"
 #import "SPUDownloaderSession.h"
+#import "SPULocalCacheDirectory.h"
 
 @interface SUBasicUpdateDriver ()
 
@@ -37,6 +39,7 @@
 @property (assign) NSComparisonResult latestAppcastItemComparisonResult;
 @property (strong) SPUDownloader *download;
 @property (copy) NSString *downloadPath;
+@property (copy) NSString *extractionDirectory;
 
 @property (strong) SUAppcastItem *nonDeltaUpdateItem;
 @property (copy) NSString *tempDir;
@@ -53,6 +56,7 @@
 @synthesize latestAppcastItemComparisonResult;
 @synthesize download;
 @synthesize downloadPath;
+@synthesize extractionDirectory = _extractionDirectory;
 
 @synthesize nonDeltaUpdateItem;
 @synthesize tempDir;
@@ -63,8 +67,8 @@
 - (void)checkForUpdatesAtURL:(NSURL *)URL host:(SUHost *)aHost
 {
     [super checkForUpdatesAtURL:URL host:aHost];
-	if ([aHost isRunningOnReadOnlyVolume])
-	{
+    if ([aHost isRunningOnReadOnlyVolume])
+    {
         NSString *hostName = [aHost name];
         if ([aHost isRunningTranslocated])
         {
@@ -145,10 +149,38 @@
     return item;
 }
 
+- (BOOL)usesPhasedRollout
+{
+    return NO;
+}
+
+- (BOOL)isItemReadyForPhasedRollout:(SUAppcastItem *)ui {
+    if(![self usesPhasedRollout] || [ui isCriticalUpdate] || ![ui phasedRolloutInterval]) {
+        return YES;
+    }
+
+    NSDate* itemReleaseDate = ui.date;
+    if(!itemReleaseDate) {
+        return YES;
+    }
+
+    NSTimeInterval timeSinceRelease = [[NSDate date] timeIntervalSinceDate:itemReleaseDate];
+
+    NSTimeInterval phasedRolloutInterval = [[ui phasedRolloutInterval] doubleValue];
+    NSTimeInterval timeToWaitForGroup = phasedRolloutInterval * [SUSystemUpdateInfo updateGroupForHost:self.host];
+
+    return timeSinceRelease >= timeToWaitForGroup;
+}
+
 - (BOOL)hostSupportsItem:(SUAppcastItem *)ui
 {
+    return [self hostSupportsOperatingSystemInItem:ui] && [self isItemReadyForPhasedRollout:ui];
+}
+
+- (BOOL)hostSupportsOperatingSystemInItem:(SUAppcastItem *)ui
+{
     BOOL osOK = [ui isMacOsUpdate];
-	if (([ui minimumSystemVersion] == nil || [[ui minimumSystemVersion] isEqualToString:@""]) &&
+    if (([ui minimumSystemVersion] == nil || [[ui minimumSystemVersion] isEqualToString:@""]) &&
         ([ui maximumSystemVersion] == nil || [[ui maximumSystemVersion] isEqualToString:@""])) {
         return osOK;
     }
@@ -174,10 +206,15 @@
     return [[self versionComparator] compareVersion:[self.host version] toVersion:[ui versionString]] == NSOrderedAscending;
 }
 
+- (BOOL)itemPreventsAutoupdate:(SUAppcastItem *)ui
+{
+    return ([ui minimumAutoupdateVersion] && ! [[ui minimumAutoupdateVersion] isEqualToString:@""] && ([[self versionComparator] compareVersion:[self.host version] toVersion:[ui minimumAutoupdateVersion]] == NSOrderedAscending));
+}
+
 - (BOOL)itemContainsSkippedVersion:(SUAppcastItem *)ui
 {
     NSString *skippedVersion = [self.host objectForUserDefaultsKey:SUSkippedVersionKey];
-	if (skippedVersion == nil) { return NO; }
+    if (skippedVersion == nil) { return NO; }
     return [[self versionComparator] compareVersion:[ui versionString] toVersion:skippedVersion] != NSOrderedDescending;
 }
 
@@ -238,6 +275,13 @@
 - (void)didFindValidUpdate
 {
     assert(self.updateItem);
+
+    // Handle the case where the update indicates that an automatic update is only available for specific versions
+    if ([self itemPreventsAutoupdate:self.updateItem]) {
+        [self.updater setAutomaticallyDownloadsUpdates:NO]; // This call will persist this setting (automatic downloads will be permanently deactivated), but that is probably OK after the rare case of a non-automatically updateable update - the user can always reactivate this in the settings or when the update information window appears for the next time.
+        [self.updater checkForUpdatesInBackground]; // Will end up in SUUIBasedUpdateDriver instead of here
+        return;
+    }
 
     id<SUUpdaterPrivate> updater = self.updater;
 
@@ -301,6 +345,9 @@
         [[NSFileManager defaultManager] removeItemAtPath:appCachePath error:NULL];
     }
 
+    // Ensure no other thirdparty app-updater is concurrently updating this app.
+    [[SUGlobalUpdateLock sharedLock] lock];
+
     id<SUUpdaterPrivate> updater = self.updater;
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[self.updateItem fileURL]];
@@ -308,22 +355,27 @@
         request.networkServiceType = NSURLNetworkServiceTypeBackground;
     }
 
-    [request setValue:[updater userAgentString] forHTTPHeaderField:@"User-Agent"];
+    NSString *userAgentString = [updater userAgentString];
+    if (userAgentString) {
+        [request setValue:userAgentString forHTTPHeaderField:@"User-Agent"];
+    }
+
+    NSDictionary<NSString *, NSString *> *httpHeaders = [updater httpHeaders];
+    if (httpHeaders) {
+        for (NSString *key in httpHeaders) {
+            NSString *value = [httpHeaders objectForKey:key];
+            [request setValue:value forHTTPHeaderField:key];
+        }
+    }
+
     if ([[updater delegate] respondsToSelector:@selector(updater:willDownloadUpdate:withRequest:)]) {
         [[updater delegate] updater:self.updater
                       willDownloadUpdate:self.updateItem
                              withRequest:request];
     }
 
-    if (SUAVAILABLE(10, 9)) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability"
-        self.download = [[SPUDownloaderSession alloc] initWithDelegate:self];
-#pragma clang diagnostic pop
-    }
-    else {
-        self.download = [[SPUDownloaderDeprecated alloc] initWithDelegate:self];
-    }
+    self.download = [[SPUDownloaderSession alloc] initWithDelegate:self];
+
     SPUURLRequest *urlRequest = [SPUURLRequest URLRequestWithRequest:request];
     NSString *desiredFilename = [NSString stringWithFormat:@"%@ %@", [self.host name], [self.updateItem versionString]];
     [self.download startPersistentDownloadWithRequest:urlRequest bundleIdentifier:bundleIdentifier desiredFilename:desiredFilename];
@@ -334,6 +386,7 @@
 {
     self.tempDir = temporaryDirectory;
     self.downloadPath = [temporaryDirectory stringByAppendingPathComponent:destinationName];
+    self.extractionDirectory = [SPULocalCacheDirectory createUniqueDirectoryInDirectory:temporaryDirectory];
 }
 
 - (void)downloaderDidReceiveExpectedContentLength:(int64_t)__unused expectedContentLength
@@ -350,6 +403,12 @@
 {
     // finished. downloadData should be nil as this was a permanent download
     assert(self.updateItem);
+    
+    if (self.updateItem.phasedRolloutInterval != nil) {
+        // use new update group next time, even if the driver doesn't usesPhasedRollout
+        [SUSystemUpdateInfo setNewUpdateGroupIdentifierForHost:self.host];
+    }
+    
     id<SUUpdaterPrivate> updater = self.updater;
     if ([[updater delegate] respondsToSelector:@selector(updater:didDownloadUpdate:)]) {
         [[updater delegate] updater:self.updater didDownloadUpdate:self.updateItem];
@@ -386,22 +445,30 @@
 
 - (void)extractUpdate
 {
-    id<SUUpdaterPrivate> updater = self.updater;
-    id<SUUnarchiverProtocol> unarchiver = [SUUnarchiver unarchiverForPath:self.downloadPath updatingHostBundlePath:self.host.bundlePath decryptionPassword:updater.decryptionPassword];
-
     BOOL success = NO;
-    if (!unarchiver) {
-        SULog(SULogLevelError, @"Error: No valid unarchiver for %@!", self.downloadPath);
+    
+    id<SUUpdaterPrivate> updater = self.updater;
+    
+    id<SUUnarchiverProtocol> unarchiver;
+    if (self.extractionDirectory == nil) {
+        SULog(SULogLevelError, @"Error: Failed to create temporary extraction directory for %@!", self.downloadPath);
+        unarchiver = nil;
     } else {
-        self.updateValidator = [[SUUpdateValidator alloc] initWithDownloadPath:self.downloadPath signatures:self.updateItem.signatures host:self.host];
-
-        // Currently unsafe archives are the only case where we can prevalidate before extraction, but that could change in the future
-        BOOL needsPrevalidation = [[unarchiver class] mustValidateBeforeExtraction];
-
-        if (needsPrevalidation) {
-            success = [self.updateValidator validateDownloadPath];
+        unarchiver = [SUUnarchiver unarchiverForPath:self.downloadPath extractionDirectory:self.extractionDirectory updatingHostBundlePath:self.host.bundlePath decryptionPassword:updater.decryptionPassword];
+        
+        if (!unarchiver) {
+            SULog(SULogLevelError, @"Error: No valid unarchiver for %@!", self.downloadPath);
         } else {
-            success = YES;
+            self.updateValidator = [[SUUpdateValidator alloc] initWithDownloadPath:self.downloadPath signatures:self.updateItem.signatures host:self.host];
+
+            // Currently unsafe archives are the only case where we can prevalidate before extraction, but that could change in the future
+            BOOL needsPrevalidation = [[unarchiver class] mustValidateBeforeExtraction];
+
+            if (needsPrevalidation) {
+                success = [self.updateValidator validateDownloadPath];
+            } else {
+                success = YES;
+            }
         }
     }
 
@@ -505,8 +572,9 @@
 {
     assert(self.updateItem);
     assert(self.updateValidator);
+    assert(self.extractionDirectory);
 
-    BOOL validationCheckSuccess = [self.updateValidator validateWithUpdateDirectory:self.tempDir];
+    BOOL validationCheckSuccess = [self.updateValidator validateWithUpdateDirectory:self.extractionDirectory];
     if (!validationCheckSuccess) {
         NSDictionary *userInfo = @{
                                    NSLocalizedDescriptionKey: SULocalizedString(@"An error occurred while extracting the archive. Please try again later.", nil),
@@ -677,6 +745,9 @@
 
 - (void)abortUpdate
 {
+    // Remove lockfile to prevent 3rd party updaters from updating this app if the update is not going to happen anyway
+    [[SUGlobalUpdateLock sharedLock] unlock];
+
     [self cleanUpDownload];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.updateItem = nil;

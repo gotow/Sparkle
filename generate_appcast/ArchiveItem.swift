@@ -24,7 +24,7 @@ class DeltaUpdate {
     class func create(from: ArchiveItem, to: ArchiveItem, archivePath: URL) throws -> DeltaUpdate {
         var applyDiffError: NSError?
 
-        if !createBinaryDelta(from.appPath.path, to.appPath.path, archivePath.path, .beigeMajorVersion, false, &applyDiffError) {
+        if !createBinaryDelta(from.appPath.path, to.appPath.path, archivePath.path, .version2, false, &applyDiffError) {
             throw applyDiffError!
         }
 
@@ -48,12 +48,13 @@ class ArchiveItem: CustomStringConvertible {
     var dsaSignature: String?
     var edSignature: String?
     var downloadUrlPrefix: URL?
+    var releaseNotesURLPrefix: URL?
 
     init(version: String, shortVersion: String?, feedURL: URL?, minimumSystemVersion: String?, publicEdKey: String?, supportsDSA: Bool, appPath: URL, archivePath: URL) throws {
         self.version = version
         self._shortVersion = shortVersion
         self.feedURL = feedURL
-        self.minimumSystemVersion = minimumSystemVersion ?? "10.7"
+        self.minimumSystemVersion = minimumSystemVersion ?? "10.9"
         self.archivePath = archivePath
         self.appPath = appPath
         self.supportsDSA = supportsDSA
@@ -62,7 +63,8 @@ class ArchiveItem: CustomStringConvertible {
         } else {
             self.publicEdKey = nil
         }
-        self.archiveFileAttributes = try FileManager.default.attributesOfItem(atPath: self.archivePath.path)
+        let path = (self.archivePath.path as NSString).resolvingSymlinksInPath
+        self.archiveFileAttributes = try FileManager.default.attributesOfItem(atPath: path)
         self.deltas = []
     }
 
@@ -139,6 +141,7 @@ class ArchiveItem: CustomStringConvertible {
     var pubDate: String {
         let date = self.archiveFileAttributes[.creationDate] as! Date
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss ZZ"
         return formatter.string(from: date)
     }
@@ -188,7 +191,11 @@ class ArchiveItem: CustomStringConvertible {
         guard let escapedFilename = path.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
             return nil
         }
-        if let relative = self.feedURL {
+        
+        if let releaseNotesURLPrefix = self.releaseNotesURLPrefix {
+            // If a URL prefix for release notes was passed on the command-line, use it
+            return URL(string: escapedFilename, relativeTo: releaseNotesURLPrefix)
+        } else if let relative = self.feedURL {
             return URL(string: escapedFilename, relativeTo: relative)
         }
         return URL(string: escapedFilename)
@@ -206,7 +213,13 @@ class ArchiveItem: CustomStringConvertible {
                 .appendingPathExtension(languageCode)
                 .appendingPathExtension("html")
             if fileManager.fileExists(atPath: localizedReleaseNoteURL.path) {
-                localizedReleaseNotes.append((languageCode, localizedReleaseNoteURL))
+                if let releaseNotesURLPrefix = self.releaseNotesURLPrefix {
+                    localizedReleaseNotes.append((languageCode, URL(string: localizedReleaseNoteURL.lastPathComponent, relativeTo: releaseNotesURLPrefix)!))
+                }
+                else {
+                    localizedReleaseNotes.append((languageCode, URL(string: localizedReleaseNoteURL.lastPathComponent)!))
+                }
+                
             }
         }
         return localizedReleaseNotes

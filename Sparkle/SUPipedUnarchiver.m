@@ -17,12 +17,14 @@
 @interface SUPipedUnarchiver ()
 
 @property (nonatomic, copy, readonly) NSString *archivePath;
+@property (nonatomic, copy, readonly) NSString *extractionDirectory;
 
 @end
 
 @implementation SUPipedUnarchiver
 
 @synthesize archivePath = _archivePath;
+@synthesize extractionDirectory = _extractionDirectory;
 
 + (nullable NSArray <NSString *> *)commandAndArgumentsConformingToTypeOfPath:(NSString *)path
 {
@@ -63,11 +65,12 @@
     return NO;
 }
 
-- (instancetype)initWithArchivePath:(NSString *)archivePath
+- (instancetype)initWithArchivePath:(NSString *)archivePath extractionDirectory:(NSString *)extractionDirectory
 {
     self = [super init];
     if (self != nil) {
         _archivePath = [archivePath copy];
+        _extractionDirectory = [extractionDirectory copy];
     }
     return self;
 }
@@ -92,9 +95,9 @@
 - (void)extractArchivePipingDataToCommand:(NSString *)command arguments:(NSArray*)args notifier:(SUUnarchiverNotifier *)notifier
 {
     // *** GETS CALLED ON NON-MAIN THREAD!!!
-	@autoreleasepool {
+    @autoreleasepool {
         NSError *error = nil;
-        NSString *destination = [self.archivePath stringByDeletingLastPathComponent];
+        NSString *destination = self.extractionDirectory;
         
         SULog(SULogLevelDefault, @"Extracting using '%@' '%@' < '%@' '%@'", command, [args componentsJoinedByString:@"' '"], self.archivePath, destination);
         

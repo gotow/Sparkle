@@ -10,8 +10,8 @@ import XCTest
 
 class SUUnarchiverTest: XCTestCase
 {
-    func unarchiveTestAppWithExtension(_ archiveExtension: String, password: String? = nil) {
-        let appName = "SparkleTestCodeSignApp"
+    func unarchiveTestAppWithExtension(_ archiveExtension: String, password: String? = nil, resourceName: String = "SparkleTestCodeSignApp", expectingSuccess: Bool = true) {
+        let appName = resourceName
         let archiveResourceURL = Bundle(for: type(of: self)).url(forResource: appName, withExtension: archiveExtension)!
 
         let fileManager = FileManager.default
@@ -24,22 +24,22 @@ class SUUnarchiverTest: XCTestCase
         let unarchivedSuccessExpectation = super.expectation(description: "Unarchived Success (format: \(archiveExtension))")
         let unarchivedFailureExpectation = super.expectation(description: "Unarchived Failure (format: \(archiveExtension))")
 
-        let tempArchiveURL = tempDirectoryURL.appendingPathComponent(archiveResourceURL.lastPathComponent)
         let extractedAppURL = tempDirectoryURL.appendingPathComponent(appName).appendingPathExtension("app")
 
-        self.unarchiveTestSuccessAppWithExtension(archiveExtension, appName: appName, tempDirectoryURL: tempDirectoryURL, tempArchiveURL: tempArchiveURL, archiveResourceURL: archiveResourceURL, password: password, testExpectation: unarchivedSuccessExpectation)
-        self.unarchiveTestFailureAppWithExtension(archiveExtension, tempDirectoryURL: tempDirectoryURL, password: password, testExpectation: unarchivedFailureExpectation)
+        self.unarchiveTestAppWithExtension(archiveExtension, appName: appName, tempDirectoryURL: tempDirectoryURL, archiveResourceURL: archiveResourceURL, password: password, expectingSuccess: expectingSuccess, testExpectation: unarchivedSuccessExpectation)
+        self.unarchiveNonExistentFileTestFailureAppWithExtension(archiveExtension, tempDirectoryURL: tempDirectoryURL, password: password, testExpectation: unarchivedFailureExpectation)
 
-        super.waitForExpectations(timeout: 7.0, handler: nil)
+        super.waitForExpectations(timeout: 30.0, handler: nil)
 
-        XCTAssertTrue(fileManager.fileExists(atPath: extractedAppURL.path))
-
-        XCTAssertEqual("6a60ab31430cfca8fb499a884f4a29f73e59b472", hashOfTree(extractedAppURL.path))
+        if !archiveExtension.hasSuffix("pkg") {
+            XCTAssertTrue(fileManager.fileExists(atPath: extractedAppURL.path))
+            XCTAssertEqual("6a60ab31430cfca8fb499a884f4a29f73e59b472", hashOfTree(extractedAppURL.path))
+        }
     }
 
-    func unarchiveTestFailureAppWithExtension(_ archiveExtension: String, tempDirectoryURL: URL, password: String?, testExpectation: XCTestExpectation) {
+    func unarchiveNonExistentFileTestFailureAppWithExtension(_ archiveExtension: String, tempDirectoryURL: URL, password: String?, testExpectation: XCTestExpectation) {
         let tempArchiveURL = tempDirectoryURL.appendingPathComponent("error-invalid").appendingPathExtension(archiveExtension)
-        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, updatingHostBundlePath: nil, decryptionPassword: password)!
+        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, extractionDirectory: tempDirectoryURL.path, updatingHostBundlePath: nil, decryptionPassword: password)!
 
         unarchiver.unarchive(completionBlock: {(error: Error?) -> Void in
             XCTAssertNotNil(error)
@@ -48,16 +48,15 @@ class SUUnarchiverTest: XCTestCase
     }
 
     // swiftlint:disable function_parameter_count
-    func unarchiveTestSuccessAppWithExtension(_ archiveExtension: String, appName: String, tempDirectoryURL: URL, tempArchiveURL: URL, archiveResourceURL: URL, password: String?, testExpectation: XCTestExpectation) {
-
-        let fileManager = FileManager.default
-
-        try! fileManager.copyItem(at: archiveResourceURL, to: tempArchiveURL)
-
-        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, updatingHostBundlePath: nil, decryptionPassword: password)!
+    func unarchiveTestAppWithExtension(_ archiveExtension: String, appName: String, tempDirectoryURL: URL, archiveResourceURL: URL, password: String?, expectingSuccess: Bool, testExpectation: XCTestExpectation) {
+        let unarchiver = SUUnarchiver.unarchiver(forPath: archiveResourceURL.path, extractionDirectory: tempDirectoryURL.path, updatingHostBundlePath: nil, decryptionPassword: password)!
 
         unarchiver.unarchive(completionBlock: {(error: Error?) -> Void in
-            XCTAssertNil(error)
+            if expectingSuccess {
+                XCTAssertNil(error)
+            } else {
+                XCTAssertNotNil(error)
+            }
             testExpectation.fulfill()
         }, progressBlock: nil)
     }
@@ -95,5 +94,12 @@ class SUUnarchiverTest: XCTestCase
     func testUnarchivingEncryptedDmg()
     {
         self.unarchiveTestAppWithExtension("enc.dmg", password: "testpass")
+    }
+    
+    func testUnarchivingFlatPackage()
+    {
+        self.unarchiveTestAppWithExtension("pkg", resourceName: "test")
+        
+        self.unarchiveTestAppWithExtension("pkg", resourceName: "test.sparkle_interactive", expectingSuccess: false)
     }
 }
